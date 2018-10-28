@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -28,13 +29,14 @@ type ConnPool struct {
 	Cnt      int64
 	New      func(name string) (NConn, error)
 
-	active int32
-	free   []NConn
-	all    map[string]NConn
+	active   int32
+	free     []NConn
+	freeLock *sync.RWMutex
+	all      map[string]NConn
 }
 
 func NewConnPool(name string, address string, maxConns int32, maxIdle int32) *ConnPool {
-	return &ConnPool{Name: name, Address: address, MaxConns: maxConns, MaxIdle: maxIdle, Cnt: 0, all: make(map[string]NConn)}
+	return &ConnPool{Name: name, Address: address, MaxConns: maxConns, MaxIdle: maxIdle, Cnt: 0, all: make(map[string]NConn), freeLock: &sync.RWMutex{}}
 }
 
 func (this *ConnPool) Proc() string {
@@ -46,8 +48,6 @@ func (this *ConnPool) Proc() string {
 }
 
 func (this *ConnPool) Fetch() (NConn, error) {
-	this.Lock()
-	defer this.Unlock()
 
 	// get from free
 	conn := this.fetchFree()
@@ -70,8 +70,6 @@ func (this *ConnPool) Fetch() (NConn, error) {
 }
 
 func (this *ConnPool) Release(conn NConn) {
-	this.Lock()
-	defer this.Unlock()
 
 	if this.overMaxIdle() {
 		this.deleteConn(conn)
@@ -82,14 +80,12 @@ func (this *ConnPool) Release(conn NConn) {
 }
 
 func (this *ConnPool) ForceClose(conn NConn) {
-	this.Lock()
-	defer this.Unlock()
-
 	this.deleteConn(conn)
 	this.decreActive()
 }
 
 func (this *ConnPool) Destroy() {
+
 	this.Lock()
 	defer this.Unlock()
 
@@ -112,7 +108,7 @@ func (this *ConnPool) Destroy() {
 
 // internal, concurrently unsafe
 func (this *ConnPool) newConn() (NConn, error) {
-	name := fmt.Sprintf("%s_%d_%d", this.Name, this.Cnt, time.Now().Unix())
+	name := fmt.Sprintf("%s_%d_%d", this.Name, this.Cnt, time.Now().UnixNano())
 	conn, err := this.New(name)
 	if err != nil {
 		if conn != nil {
@@ -121,16 +117,23 @@ func (this *ConnPool) newConn() (NConn, error) {
 		return nil, err
 	}
 
-	this.Cnt++
+	atomic.AddInt64(&this.Cnt, 1)
+
+	this.Lock()
 	this.all[conn.Name()] = conn
+	this.Unlock()
+
 	return conn, nil
 }
 
 func (this *ConnPool) deleteConn(conn NConn) {
+	this.Lock()
 	if conn != nil {
 		conn.Close()
 	}
 	delete(this.all, conn.Name())
+	this.Unlock()
+	atomic.AddInt64(&this.Cnt, -1)
 }
 
 func (this *ConnPool) addFree(conn NConn) {
@@ -138,9 +141,13 @@ func (this *ConnPool) addFree(conn NConn) {
 }
 
 func (this *ConnPool) fetchFree() NConn {
+
 	if len(this.free) == 0 {
 		return nil
 	}
+
+	this.freeLock.Lock()
+	defer this.freeLock.Unlock()
 
 	conn := this.free[0]
 	this.free = this.free[1:]
@@ -148,11 +155,11 @@ func (this *ConnPool) fetchFree() NConn {
 }
 
 func (this *ConnPool) increActive() {
-	this.active += 1
+	atomic.AddInt32(&this.active, 1)
 }
 
 func (this *ConnPool) decreActive() {
-	this.active -= 1
+	atomic.AddInt32(&this.active, -1)
 }
 
 func (this *ConnPool) overMax() bool {

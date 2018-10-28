@@ -76,16 +76,18 @@ func (this *SafeRpcConnPools) Get(address string) (*ConnPool, bool) {
 }
 
 func (this *SafeRpcConnPools) Destroy() {
-	this.Lock()
-	defer this.Unlock()
+	this.RLock()
 	addresses := make([]string, 0, len(this.M))
 	for address := range this.M {
 		addresses = append(addresses, address)
 	}
+	this.RUnlock()
 
 	for _, address := range addresses {
+		this.Lock()
 		this.M[address].Destroy()
 		delete(this.M, address)
+		this.Unlock()
 	}
 }
 
