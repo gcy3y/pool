@@ -137,18 +137,18 @@ func (this *ConnPool) deleteConn(conn NConn) {
 }
 
 func (this *ConnPool) addFree(conn NConn) {
+	this.freeLock.Lock()
 	this.free = append(this.free, conn)
+	this.freeLock.Unlock()
 }
 
 func (this *ConnPool) fetchFree() NConn {
 
+	this.freeLock.Lock()
+	defer this.freeLock.Unlock()
 	if len(this.free) == 0 {
 		return nil
 	}
-
-	this.freeLock.Lock()
-	defer this.freeLock.Unlock()
-
 	conn := this.free[0]
 	this.free = this.free[1:]
 	return conn
